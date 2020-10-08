@@ -2,44 +2,60 @@ package spring
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
+	"log"
 	"net/http"
 	"reflect"
 
 	"github.com/gorilla/mux"
+	"gitlab.com/BPeters58/go-spring-app/model"
 )
-
-type Handler struct {
-	Route       string
-	Handler     interface{}
-	Params      []string
-	Method      string
-	Produces    string
-	Consumes    string
-	RequestBody interface{}
-}
 
 func AddController(controller interface{}) {
 	typeOf := reflect.TypeOf(controller)
 	valueOf := reflect.ValueOf(controller)
 	for i := 0; i < typeOf.NumMethod(); i++ {
 		//
-		method := typeOf.Method(i).Name
-		value := valueOf.MethodByName(method).Call([]reflect.Value{})
+		validMethod := true
+		method := typeOf.Method(i)
+		for i := 0; i < method.Type.NumOut(); i++ {
+			methodType := reflect.New(method.Type.Out(i)).Interface()
+			switch methodType.(type) {
+			case Handler:
+				validMethod = false
+				break
+			}
+		}
+		if !validMethod {
+			continue
+		}
+		value := valueOf.MethodByName(method.Name).Call([]reflect.Value{})
 		//
 		routeValue := value[0].FieldByName("Route")
 		httpVerbValue := value[0].FieldByName("Method")
-		// handlerValue := value[0].FieldByName("Handler")
+		handlerValue := value[0].FieldByName("Handler")
 		consumesValue := value[0].FieldByName("Consumes")
 		producesValue := value[0].FieldByName("Produces")
-		requestBodyValue := value[0].FieldByName("RequestBody")
 		//
 		router := routeValue.Interface().(string)
 		httpVerb := httpVerbValue.Interface().(string)
 		produces := producesValue.Interface().(string)
 		consumes := consumesValue.Interface().(string)
-		handler := generateHandler(requestBodyValue, consumes, produces)
+		if handlerValue.Interface() == nil {
+			log.Fatal("Handler is required")
+		}
+		if router == "" {
+			log.Fatal("Route is required")
+		}
+		if httpVerb == "" {
+			log.Fatal("Method is required")
+		}
+		if produces == "" {
+			log.Fatal("Produces is required")
+		}
+		if consumes == "" {
+			log.Fatal("Consumes is required")
+		}
+		handler := generateHandler(handlerValue, consumes, produces)
 		//
 		var r *mux.Router
 		Container.Make(&r)
@@ -47,47 +63,25 @@ func AddController(controller interface{}) {
 	}
 }
 
-func generateHandler(requestBodyValue reflect.Value, consumes, produces string) func(w http.ResponseWriter, r *http.Request) {
+func generateHandler(handlerValue reflect.Value, consumes, produces string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", produces)
-		var body map[string]interface{}
+		handlerType := handlerValue.Elem().Type()
+		requestPointer := reflect.New(handlerType.In(0))
+		log.Println(requestPointer.Type())
+		requestBody := reflect.Indirect(reflect.ValueOf(requestPointer.Interface())).Interface().(model.Test)
 		switch consumes {
 		case "application/json":
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 				http.Error(w, err.Error(), 400)
 				return
 			}
 		}
-
-		if err := validateRequestBody(requestBodyValue, body); err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-
-		resp := getReservationImpl(body)
-		json.NewEncoder(w).Encode(resp)
+		resp := handlerValue.Elem().Call([]reflect.Value{reflect.ValueOf(requestBody)})
+		json.NewEncoder(w).Encode(resp[0].Interface())
 	}
 }
 
-func getReservationImpl(test map[string]interface{}) string {
-	return "Worked"
-}
-
-func validateRequestBody(requestBodyValue reflect.Value, body map[string]interface{}) error {
-	// what i want is to access the fields in the struct and then valid that against the incoming request map
-	v := requestBodyValue.Elem().Type()
-	for i := 0; i < v.NumField(); i++ {
-		field := v.Field(i)
-		fieldName := field.Tag.Get("json")
-		fieldType := field.Type
-		value, ok := body[fieldName]
-		if !ok {
-			return errors.New("Missing field " + fieldName)
-		}
-
-		if fmt.Sprintf("%T", value) != fieldType.String() {
-			return errors.New("Invalid type " + fieldType.String() + " for field " + fieldName)
-		}
-	}
+func validateRequestBody() error {
 	return nil
 }
