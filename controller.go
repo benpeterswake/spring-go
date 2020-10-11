@@ -7,21 +7,19 @@ import (
 	"reflect"
 
 	"github.com/gorilla/mux"
-	"gitlab.com/BPeters58/go-spring-app/model"
 )
 
 func AddController(controller interface{}) {
 	typeOf := reflect.TypeOf(controller)
 	valueOf := reflect.ValueOf(controller)
 	for i := 0; i < typeOf.NumMethod(); i++ {
-		//
-		validMethod := true
+		validMethod := false
 		method := typeOf.Method(i)
 		for i := 0; i < method.Type.NumOut(); i++ {
-			methodType := reflect.New(method.Type.Out(i)).Interface()
-			switch methodType.(type) {
-			case Handler:
-				validMethod = false
+			methodType := method.Type.Out(i).Name()
+			switch methodType {
+			case "Handler":
+				validMethod = true
 				break
 			}
 		}
@@ -55,30 +53,44 @@ func AddController(controller interface{}) {
 		if consumes == "" {
 			log.Fatal("Consumes is required")
 		}
-		handler := generateHandler(handlerValue, consumes, produces)
+		handler := generateHandler(handlerValue, httpVerb, consumes, produces)
 		//
-		var r *mux.Router
-		Container.Make(&r)
-		r.HandleFunc(router, handler).Methods(httpVerb)
+		app.muxRouter.HandleFunc(router, handler).Methods(httpVerb)
 	}
 }
 
-func generateHandler(handlerValue reflect.Value, consumes, produces string) func(w http.ResponseWriter, r *http.Request) {
+func generateHandler(handlerValue reflect.Value, method, consumes, produces string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", produces)
-		handlerType := handlerValue.Elem().Type()
-		requestPointer := reflect.New(handlerType.In(0))
-		log.Println(requestPointer.Type())
-		requestBody := reflect.Indirect(reflect.ValueOf(requestPointer.Interface())).Interface().(model.Test)
-		switch consumes {
-		case "application/json":
-			if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-				http.Error(w, err.Error(), 400)
-				return
+		var requestBody map[string]interface{}
+		if method != http.MethodGet {
+			switch consumes {
+			case "application/json":
+				if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+					http.Error(w, "Error unmarsheling request body: "+err.Error(), 400)
+					return
+				}
 			}
 		}
-		resp := handlerValue.Elem().Call([]reflect.Value{reflect.ValueOf(requestBody)})
-		json.NewEncoder(w).Encode(resp[0].Interface())
+		var resp []reflect.Value
+		vars := mux.Vars(r)
+		params := r.URL.Query()
+		resp = handlerValue.Elem().Call([]reflect.Value{reflect.ValueOf(requestBody), reflect.ValueOf(vars), reflect.ValueOf(params)})
+		switch len(resp) {
+		case 1:
+			if resp[0].Interface() != nil {
+				http.Error(w, resp[0].Interface().(error).Error(), 400)
+				return
+			}
+			w.WriteHeader(200)
+		case 2:
+			if resp[1].Interface() != nil {
+				http.Error(w, resp[1].Interface().(error).Error(), 400)
+				return
+			}
+			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(resp[0].Interface())
+		}
 	}
 }
 
