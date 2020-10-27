@@ -38,7 +38,8 @@ func AddController(controller interface{}) {
 		httpVerb := httpVerbValue.Interface().(string)
 		produces := producesValue.Interface().(string)
 		consumes := consumesValue.Interface().(string)
-		if handlerValue.Interface() == nil {
+		handlerInterface := handlerValue.Interface()
+		if handlerInterface == nil {
 			log.Fatal("Handler is required")
 		}
 		if router == "" {
@@ -62,13 +63,26 @@ func AddController(controller interface{}) {
 func generateHandler(handlerValue reflect.Value, method, consumes, produces string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", produces)
-		var requestBody map[string]interface{}
+		arg := reflect.TypeOf(handlerValue.Interface())
+		ptrValue := reflect.New(arg.In(0).Elem())
+		requestBody := ptrValue.Interface()
 		if method != http.MethodGet {
 			switch consumes {
 			case "application/json":
 				if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 					http.Error(w, "Error unmarsheling request body: "+err.Error(), 400)
 					return
+				}
+				validateFunction := ptrValue.MethodByName("Validate")
+				log.Println(validateFunction)
+				if validateFunction.IsValid() {
+					validation := validateFunction.Call([]reflect.Value{})
+					isValid := validation[1].Interface().(bool)
+					msg := validation[0].Interface().(string)
+					if !isValid {
+						http.Error(w, msg, 400)
+						return
+					}
 				}
 			}
 		}
