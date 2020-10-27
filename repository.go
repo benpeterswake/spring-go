@@ -71,7 +71,7 @@ func (c CRUDRepository) Save(model interface{}) error {
 	valueOf := reflect.ValueOf(model)
 	tableName := strings.ToLower(typeOf.Name())
 	if valueOfDataType.NumMethod() != 0 {
-		tableMethod := valueOfDataType.MethodByName("Table")
+		tableMethod := valueOfDataType.MethodByName("TableName")
 		if tableMethod.IsValid() {
 			tableNameValue := tableMethod.Call([]reflect.Value{})
 			tableName = tableNameValue[0].Interface().(string)
