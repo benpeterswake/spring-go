@@ -10,54 +10,89 @@ import (
 	_ "github.com/lib/pq"
 )
 
-var dataType interface{}
+var repositories map[string]reflect.Value = make(map[string]reflect.Value)
 
-func AddRepository(repo interface{}, typ interface{}) {
-	dataType = typ
-	// loop over the methods on a struct
-	// obj := reflect.ValueOf(repo)
-	typeOf := reflect.TypeOf(repo)
-	for i := 0; i < typeOf.NumField(); i++ {
-		if typeOf.Field(i).Name != "CRUDRepository" {
+type CRUDRepository struct {
+	dataType interface{}
+}
+
+func AddRepository(repo interface{}, dataType interface{}) {
+	var nilError = reflect.Zero(reflect.TypeOf((*error)(nil)).Elem())
+	ptr := reflect.ValueOf(repo)
+	if ptr.Kind() != reflect.Ptr {
+		log.Fatal("Repository is not pointer")
+	}
+	ptr = ptr.Elem()
+	repositories[ptr.Type().Name()] = ptr
+	for i := 0; i < ptr.NumField(); i++ {
+		if ptr.Type().Field(i).Name == "CRUDRepository" {
+			field := ptr.Field(i)
+			field.Set(reflect.ValueOf(CRUDRepository{dataType: dataType}))
+		} else {
 			// ...
-			query := typeOf.Field(i).Tag.Get("query")
+			query := ptr.Type().Field(i).Tag.Get("query")
 			if query != "" {
-				// // the implementation passed to MakeFunc.
-				// // It must work in terms of reflect.Values so that it is possible
-				// // to write code without knowing beforehand what the types
-				// // will be.
-				// implemention := func(in []reflect.Value) []reflect.Value {
-				// 	inVal := []interface{}{}
-				// 	for _, val := range in {
-				// 		inVal = append(inVal, val.Interface())
-				// 	}
-				// 	result, err := app.db.Exec(query, inVal...)
-				// 	if err != nil {
-				// 		return []reflect.Value{reflect.ValueOf(nil), reflect.ValueOf(err)}
-				// 	}
-				// 	return []reflect.Value{reflect.ValueOf(result), reflect.ValueOf(nil)}
-				// }
-				// // fptr is a pointer to a function.
-				// // Obtain the function value itself (likely nil) as a reflect.Value
-				// // so that we can query its type and then set the value.
-				// fn := obj.Field(i)
+				// the implementation passed to MakeFunc.
+				// It must work in terms of reflect.Values so that it is possible
+				// to write code without knowing beforehand what the types
+				// will be.
+				implemention := func(in []reflect.Value) []reflect.Value {
+					inVal := []interface{}{}
+					for _, val := range in {
+						inVal = append(inVal, val.Interface())
+					}
+					stmt, err := app.db.Prepare(query)
+					if err != nil {
+						return []reflect.Value{nilError, reflect.ValueOf(err)}
+					}
+					rows, err := stmt.Query(inVal...)
+					if err != nil {
+						return []reflect.Value{nilError, reflect.ValueOf(err)}
+					}
+					columns, err := rows.Columns()
+					if err != nil {
+						return []reflect.Value{nilError, reflect.ValueOf(err)}
+					}
+					colNum := len(columns)
 
-				// // Make a function of the right type.
-				// v := reflect.MakeFunc(fn.Type(), implemention)
+					var values = make([]interface{}, colNum)
+					for i := range values {
+						var ii interface{}
+						values[i] = &ii
+					}
+					for rows.Next() {
+						err := rows.Scan(values...)
+						if err != nil {
+							return []reflect.Value{ptr, reflect.ValueOf(err)}
+						}
+						for i, colName := range columns {
+							var raw_value = *(values[i].(*interface{}))
+							var raw_type = reflect.TypeOf(raw_value)
 
-				// // Assign it to the value fn represents.
-				// fn.Set(v)
+							fmt.Println(colName, raw_type, raw_value)
+						}
+					}
+					return []reflect.Value{reflect.ValueOf(rows), nilError}
+				}
+				// fptr is a pointer to a function.
+				// Obtain the function value itself (likely nil) as a reflect.Value
+				// so that we can query its type and then set the value.
+				fn := ptr.Field(i)
+
+				// Make a function of the right type.
+				v := reflect.MakeFunc(fn.Type(), implemention)
+
+				// Assign it to the value fn represents.
+				fn.Set(v)
 			}
 		}
 	}
 }
 
-type CRUDRepository struct{}
-
 func (c CRUDRepository) Save(model interface{}) error {
 	log.Println("[Save]: starting database entry")
-	typeOf := reflect.TypeOf(dataType)
-	valueOfDataType := reflect.ValueOf(dataType)
+	valueOfDataType := reflect.Indirect(reflect.ValueOf(c.dataType))
+	typeOf := valueOfDataType.Type()
 	valueOf := reflect.Indirect(reflect.ValueOf(model))
 	tableName := strings.ToLower(typeOf.Name())
 	if valueOfDataType.NumMethod() != 0 {
@@ -67,7 +102,6 @@ func (c CRUDRepository) Save(model interface{}) error {
 			tableName = tableNameValue[0].Interface().(string)
 		}
 	}
-
 	fieldValues := []interface{}{}
 	fieldNames := []string{}
 	fieldMarkers := []string{}
@@ -84,9 +118,9 @@ func (c CRUDRepository) Save(model interface{}) error {
 		fieldNames = append(fieldNames, jsonTag)
 		fieldMarkers = append(fieldMarkers, "$"+strconv.FormatInt(int64(i), 10))
 	}
-	sqlStatement := "INSERT INTO " + tableName + " (" + strings.Join(fieldNames, ",") + ") VALUES ( " + strings.Join(fieldMarkers, ",") + " );"
+	query, err := app.db.Prepare("INSERT INTO " + tableName + " (" + strings.Join(fieldNames, ",") + ") VALUES ( " + strings.Join(fieldMarkers, ",") + " );")
 	log.Println("[Save]: saving ", fieldValues)
-	_, err := app.db.Exec(sqlStatement, fieldValues...)
+	_, err = query.Exec(fieldValues...)
 	if err != nil {
 		return err
 	}
@@ -96,9 +130,9 @@ func (c CRUDRepository) Save(model interface{}) error {
 
 func (c CRUDRepository) FindByID(id string) (map[string]interface{}, error) {
 	log.Println("[FindByID]: starting database query")
-	typeOf := reflect.TypeOf(dataType)
-	valueOfDataType := reflect.ValueOf(dataType)
-	tableName := strings.ToLower(typeOf.Name())
+	valueOfDataType := reflect.Indirect(reflect.ValueOf(c.dataType))
+	tableName := strings.ToLower(valueOfDataType.Type().Name())
+	log.Println(tableName, id)
 	if valueOfDataType.NumMethod() != 0 {
 		tableMethod := valueOfDataType.MethodByName("TableName")
 		if tableMethod.IsValid() {
@@ -106,8 +140,12 @@ func (c CRUDRepository) FindByID(id string) (map[string]interface{}, error) {
 			tableName = tableNameValue[0].Interface().(string)
 		}
 	}
-	query := "SELECT * FROM " + tableName + " WHERE id = " + id + ";"
-	rows, err := app.db.Query(query)
+
+	query, err := app.db.Prepare("SELECT * FROM " + tableName + " WHERE id = " + id + ";")
+	if err != nil {
+		return nil, err
+	}
+	rows, err := query.Query()
 	if err != nil {
 		return nil, err
 	}

@@ -10,8 +10,19 @@ import (
 )
 
 func AddController(controller interface{}) {
-	typeOf := reflect.TypeOf(controller)
 	valueOf := reflect.ValueOf(controller)
+	if valueOf.Kind() != reflect.Ptr {
+		log.Fatal("Controller is not pointer")
+	}
+	typeOf := reflect.TypeOf(controller)
+	valueOf = valueOf.Elem()
+	for i := 0; i < valueOf.NumField(); i++ {
+		repo, ok := services[valueOf.Field(i).Type().Name()]
+		if ok {
+			valueOf.Field(i).Set(repo)
+		}
+	}
+
 	for i := 0; i < typeOf.NumMethod(); i++ {
 		validMethod := false
 		method := typeOf.Method(i)
