@@ -12,72 +12,106 @@ import (
 
 var repositories map[string]reflect.Value = make(map[string]reflect.Value)
 
-type CRUDRepository struct {
-	dataType interface{}
-}
-
 func AddRepository(repo interface{}, dataType interface{}) {
-	var nilError = reflect.Zero(reflect.TypeOf((*error)(nil)).Elem())
-	ptr := reflect.ValueOf(repo)
-	if ptr.Kind() != reflect.Ptr {
+	repoPtr := reflect.ValueOf(repo)
+	if repoPtr.Kind() != reflect.Ptr {
 		log.Fatal("Repository is not pointer")
 	}
-	ptr = ptr.Elem()
-	repositories[ptr.Type().Name()] = ptr
-	for i := 0; i < ptr.NumField(); i++ {
-		if ptr.Type().Field(i).Name == "CRUDRepository" {
-			field := ptr.Field(i)
+	repoPtr = repoPtr.Elem()
+	repoPtrType := repoPtr.Type()
+	var nilError = reflect.Zero(reflect.TypeOf((*error)(nil)).Elem())
+	repositories[repoPtrType.Name()] = repoPtr
+	for i := 0; i < repoPtr.NumField(); i++ {
+		field := repoPtrType.Field(i)
+		if field.Name == "CRUDRepository" {
+			field := repoPtr.Field(i)
 			field.Set(reflect.ValueOf(CRUDRepository{dataType: dataType}))
 		} else {
 			// ...
-			query := ptr.Type().Field(i).Tag.Get("query")
+			query := field.Tag.Get("query")
 			if query != "" {
 				// the implementation passed to MakeFunc.
 				// It must work in terms of reflect.Values so that it is possible
 				// to write code without knowing beforehand what the types
 				// will be.
 				implemention := func(in []reflect.Value) []reflect.Value {
+					dataTypePtr := reflect.New(field.Type.Out(0).Elem())
+					v := dataTypePtr.Elem()
+					t := field.Type.Out(0).Elem()
+
 					inVal := []interface{}{}
 					for _, val := range in {
 						inVal = append(inVal, val.Interface())
 					}
 					stmt, err := app.db.Prepare(query)
 					if err != nil {
-						return []reflect.Value{nilError, reflect.ValueOf(err)}
+						return []reflect.Value{dataTypePtr, reflect.ValueOf(err)}
 					}
+					// TODO: check if exec or query
 					rows, err := stmt.Query(inVal...)
 					if err != nil {
-						return []reflect.Value{nilError, reflect.ValueOf(err)}
+						return []reflect.Value{dataTypePtr, reflect.ValueOf(err)}
 					}
-					columns, err := rows.Columns()
+
+					cols, err := rows.Columns()
 					if err != nil {
-						return []reflect.Value{nilError, reflect.ValueOf(err)}
+						return []reflect.Value{dataTypePtr, reflect.ValueOf(err)}
 					}
-					colNum := len(columns)
 
-					var values = make([]interface{}, colNum)
-					for i := range values {
-						var ii interface{}
-						values[i] = &ii
-					}
+					var m map[string]interface{}
 					for rows.Next() {
-						err := rows.Scan(values...)
-						if err != nil {
-							return []reflect.Value{ptr, reflect.ValueOf(err)}
+						columns := make([]interface{}, len(cols))
+						columnPointers := make([]interface{}, len(cols))
+						for i := range columns {
+							columnPointers[i] = &columns[i]
 						}
-						for i, colName := range columns {
-							var raw_value = *(values[i].(*interface{}))
-							var raw_type = reflect.TypeOf(raw_value)
 
-							fmt.Println(colName, raw_type, raw_value)
+						if err := rows.Scan(columnPointers...); err != nil {
+							return []reflect.Value{dataTypePtr, reflect.ValueOf(err)}
+						}
+
+						m = make(map[string]interface{})
+						for i, colName := range cols {
+							val := columnPointers[i].(*interface{})
+							m[colName] = *val
+						}
+
+					}
+
+					for i := 0; i < v.NumField(); i++ {
+						field := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]
+
+						if item, ok := m[field]; ok {
+							if v.Field(i).CanSet() {
+								if item != nil {
+									switch v.Field(i).Kind() {
+									case reflect.Int:
+										v.Field(i).SetInt(item.(int64))
+									case reflect.String:
+										v.Field(i).SetString(item.(string))
+									case reflect.Float32, reflect.Float64:
+										v.Field(i).SetFloat(item.(float64))
+									case reflect.Ptr:
+										if reflect.ValueOf(item).Kind() == reflect.Bool {
+											itemBool := item.(bool)
+											v.Field(i).Set(reflect.ValueOf(&itemBool))
+										}
+									case reflect.Struct:
+										v.Field(i).Set(reflect.ValueOf(item))
+									default:
+										fmt.Println(t.Field(i).Name, ": ", v.Field(i).Kind(), " - > - ", reflect.ValueOf(item).Kind()) // @todo remove after test out the Get methods
+									}
+								}
+							}
 						}
 					}
-					return []reflect.Value{reflect.ValueOf(rows), nilError}
+
+					return []reflect.Value{dataTypePtr, nilError}
 				}
-				// fptr is a pointer to a function.
+				// frepoPtr is a pointer to a function.
 				// Obtain the function value itself (likely nil) as a reflect.Value
 				// so that we can query its type and then set the value.
-				fn := ptr.Field(i)
+				fn := repoPtr.Field(i)
 
 				// Make a function of the right type.
 				v := reflect.MakeFunc(fn.Type(), implemention)
@@ -87,6 +121,10 @@ func AddRepository(repo interface{}, dataType interface{}) {
 			}
 		}
 	}
+}
+
+type CRUDRepository struct {
+	dataType interface{}
 }
 
 func (c CRUDRepository) Save(model interface{}) error {
@@ -128,13 +166,16 @@ func (c CRUDRepository) Save(model interface{}) error {
 	return nil
 }
 
-func (c CRUDRepository) FindByID(id string) (map[string]interface{}, error) {
+func (c CRUDRepository) FindByID(id string) (interface{}, error) {
 	log.Println("[FindByID]: starting database query")
-	valueOfDataType := reflect.Indirect(reflect.ValueOf(c.dataType))
-	tableName := strings.ToLower(valueOfDataType.Type().Name())
+	value := reflect.ValueOf(c.dataType)
+	v := value.Elem()
+	t := v.Type()
+
+	tableName := strings.ToLower(t.Name())
 	log.Println(tableName, id)
-	if valueOfDataType.NumMethod() != 0 {
-		tableMethod := valueOfDataType.MethodByName("TableName")
+	if v.NumMethod() != 0 {
+		tableMethod := v.MethodByName("TableName")
 		if tableMethod.IsValid() {
 			tableNameValue := tableMethod.Call([]reflect.Value{})
 			tableName = tableNameValue[0].Interface().(string)
@@ -149,32 +190,60 @@ func (c CRUDRepository) FindByID(id string) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	cols, _ := rows.Columns()
-	m := make(map[string]interface{})
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	var m map[string]interface{}
 	for rows.Next() {
-		// Create a slice of interface{}'s to represent each column,
-		// and a second slice to contain pointers to each item in the columns slice.
 		columns := make([]interface{}, len(cols))
 		columnPointers := make([]interface{}, len(cols))
 		for i := range columns {
 			columnPointers[i] = &columns[i]
 		}
 
-		// Scan the result into the column pointers...
 		if err := rows.Scan(columnPointers...); err != nil {
 			return nil, err
 		}
 
-		// Create our map, and retrieve the value for each column from the pointers slice,
-		// storing it in the map with the name of the column as the key.
-
+		m = make(map[string]interface{})
 		for i, colName := range cols {
 			val := columnPointers[i].(*interface{})
 			m[colName] = *val
 		}
-		// Outputs: map[columnName:value columnName2:value2 columnName3:value3 ...]
+
+	}
+
+	for i := 0; i < v.NumField(); i++ {
+		field := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]
+
+		if item, ok := m[field]; ok {
+			if v.Field(i).CanSet() {
+				if item != nil {
+					switch v.Field(i).Kind() {
+					case reflect.Int:
+						v.Field(i).SetInt(item.(int64))
+					case reflect.String:
+						v.Field(i).SetString(item.(string))
+					case reflect.Float32, reflect.Float64:
+						v.Field(i).SetFloat(item.(float64))
+					case reflect.Ptr:
+						if reflect.ValueOf(item).Kind() == reflect.Bool {
+							itemBool := item.(bool)
+							v.Field(i).Set(reflect.ValueOf(&itemBool))
+						}
+					case reflect.Struct:
+						v.Field(i).Set(reflect.ValueOf(item))
+					default:
+						fmt.Println(t.Field(i).Name, ": ", v.Field(i).Kind(), " - > - ", reflect.ValueOf(item).Kind()) // @todo remove after test out the Get methods
+					}
+				}
+			}
+		}
 	}
 	log.Println("[FindByID]: data: " + fmt.Sprintf("%v", m))
 	log.Println("[FindByID]: ending database query")
-	return m, nil
+	return value.Interface(), nil
 }
